@@ -156,7 +156,7 @@ func (c *Coordinator) KnownClients() []string {
 func (c *Coordinator) Add(client *Client) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.clients, client.fqdn)
+	c.clients[client.fqdn] = client
 	level.Info(c.logger).Log("msg", "Added client", "fqdn", client.fqdn)
 }
 
