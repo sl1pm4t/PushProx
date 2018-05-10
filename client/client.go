@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -12,7 +11,12 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/websocket"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
+
+	"bufio"
+
+	"io"
 
 	"github.com/ShowMax/go-fqdn"
 	"github.com/go-kit/kit/log"
@@ -104,35 +108,79 @@ func (c *Coordinator) doPush(resp *http.Response, origRequest *http.Request, cli
 }
 
 func loop(c Coordinator) {
-	client := &http.Client{}
+	client := &http.Client{
+		// Timeout: 10 * time.Second,
+	}
 	base, err := url.Parse(*proxyURL)
 	if err != nil {
 		level.Error(c.logger).Log("msg", "Error parsing url:", "err", err)
 		return
 	}
-	u, err := url.Parse("/poll")
+	u, err := url.Parse("/socket")
 	if err != nil {
 		level.Error(c.logger).Log("msg", "Error parsing url:", "err", err)
 		return
 	}
 	url := base.ResolveReference(u)
-	resp, err := client.Post(url.String(), "", strings.NewReader(*myFqdn))
+
+	if url.Scheme == "http" {
+		url.Scheme = "ws"
+	} else if url.Scheme == "https" {
+		url.Scheme = "wss"
+	}
+
+	var origin = fmt.Sprintf("http://%s/", *myFqdn)
+
+	level.Info(c.logger).Log("msg", "Dialing proxy:", "url", url.String())
+	ws, err := websocket.Dial(url.String(), "", origin)
 	if err != nil {
-		level.Error(c.logger).Log("msg", "Error polling:", "err", err)
+		level.Error(c.logger).Log("err", err.Error())
 		time.Sleep(time.Second) // Don't pound the server. TODO: Randomised exponential backoff.
 		return
 	}
-	defer resp.Body.Close()
-	request, err := http.ReadRequest(bufio.NewReader(resp.Body))
+
+	err = websocket.JSON.Send(ws, &util.SocketMessage{
+		Type: util.Register,
+		Payload: map[string]string{
+			"fqdn": *myFqdn,
+		},
+	})
 	if err != nil {
-		level.Error(c.logger).Log("msg", "Error reading request:", "err", err)
-		return
+		level.Error(c.logger).Log(err)
 	}
-	level.Info(c.logger).Log("msg", "Got scrape request", "scrape_id", request.Header.Get("id"), "url", request.URL)
+	level.Info(c.logger).Log("msg", "client registered with proxy")
 
-	request.RequestURI = ""
+	ready := &util.SocketMessage{
+		Type: util.Ready,
+	}
 
-	go c.doScrape(request, client)
+	for {
+		err = websocket.JSON.Send(ws, ready)
+		if err != nil {
+			level.Error(c.logger).Log(err)
+		}
+
+		var msg = &util.SocketMessage{}
+		err = websocket.JSON.Receive(ws, msg)
+		if err != nil {
+			if err == io.EOF {
+				return
+			}
+			level.Error(c.logger).Log(err)
+			return
+		}
+		fmt.Printf("Receive: %s\n", msg)
+
+		reader := bufio.NewReader(strings.NewReader(msg.Payload["request"]))
+		request, err := http.ReadRequest(reader)
+		if err != nil {
+			level.Error(c.logger).Log(err)
+		}
+		fmt.Printf("Scrape Request: %s\n", request)
+		request.RequestURI = ""
+		c.doScrape(request, client)
+		//time.Sleep(time.Second)
+	}
 }
 
 func main() {

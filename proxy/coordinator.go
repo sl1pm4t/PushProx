@@ -27,8 +27,8 @@ type Coordinator struct {
 	waiting map[string]chan *http.Request
 	// Responses from clients.
 	responses map[string]chan *http.Response
-	// Clients we know about and when they last contacted us.
-	known map[string]time.Time
+	// Clients we know about.
+	clients map[string]*Client
 
 	logger log.Logger
 }
@@ -37,10 +37,9 @@ func NewCoordinator(logger log.Logger) *Coordinator {
 	c := &Coordinator{
 		waiting:   map[string]chan *http.Request{},
 		responses: map[string]chan *http.Response{},
-		known:     map[string]time.Time{},
+		clients:   map[string]*Client{},
 		logger:    logger,
 	}
-	go c.gc()
 	return c
 }
 
@@ -106,17 +105,18 @@ func (c *Coordinator) DoScrape(ctx context.Context, r *http.Request) (*http.Resp
 }
 
 // Client registering to accept a scrape request. Blocking.
-func (c *Coordinator) WaitForScrapeInstruction(fqdn string) (*http.Request, error) {
-	level.Info(c.logger).Log("msg", "WaitForScrapeInstruction", "fqdn", fqdn)
+func (c *Coordinator) WaitForScrapeInstruction(client *Client) (*http.Request, error) {
+	level.Info(c.logger).Log("msg", "WaitForScrapeInstruction", "fqdn", client.fqdn)
 
-	c.addKnownClient(fqdn)
 	// TODO: What if the client times out?
-	ch := c.getRequestChannel(fqdn)
+	ch := c.getRequestChannel(client.fqdn)
 	for {
 		request := <-ch
 		select {
 		case <-request.Context().Done():
 			// Request has timed out, get another one.
+		case <-client.doneCh:
+			return nil, nil
 		default:
 			return request, nil
 		}
@@ -140,43 +140,30 @@ func (c *Coordinator) ScrapeResult(r *http.Response) error {
 	}
 }
 
-func (c *Coordinator) addKnownClient(fqdn string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.known[fqdn] = time.Now()
-}
-
 // What clients are alive.
 func (c *Coordinator) KnownClients() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	limit := time.Now().Add(-*registrationTimeout)
-	known := make([]string, 0, len(c.known))
-	for k, t := range c.known {
-		if limit.Before(t) {
-			known = append(known, k)
-		}
+	known := make([]string, 0, len(c.clients))
+	for k, _ := range c.clients {
+		known = append(known, k)
 	}
 	return known
 }
 
-// Garbagee collect old clients.
-func (c *Coordinator) gc() {
-	for range time.Tick(1 * time.Minute) {
-		func() {
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			limit := time.Now().Add(-*registrationTimeout)
-			deleted := 0
-			for k, ts := range c.known {
-				if ts.Before(limit) {
-					delete(c.known, k)
-					deleted++
-				}
-			}
-			level.Info(c.logger).Log("msg", "GC of clients completed", "deleted", deleted, "remaining", len(c.known))
-		}()
-	}
+// Add client to known list
+func (c *Coordinator) Add(client *Client) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.clients, client.fqdn)
+	level.Info(c.logger).Log("msg", "Added client", "fqdn", client.fqdn)
+}
+
+// Del client from known list
+func (c *Coordinator) Del(client *Client) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.clients, client.fqdn)
+	level.Info(c.logger).Log("msg", "Deleted client", "fqdn", client.fqdn)
 }

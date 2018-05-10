@@ -7,22 +7,36 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
-	"strings"
 
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 
+	kitlog "github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/promlog"
 	"github.com/prometheus/common/promlog/flag"
 
 	"github.com/robustperception/pushprox/util"
+	"github.com/rs/cors"
+	"golang.org/x/net/websocket"
 )
 
 var (
 	listenAddress = kingpin.Flag("web.listen-address", "Address to listen on for proxy and client requests.").Default(":8080").String()
+
+	clients = make(map[*websocket.Conn]bool) // connected clients
+
+	//upgrader = websocket.Upgrader{
+	//	CheckOrigin: func(r *http.Request) bool {
+	//		return true
+	//	},
+	//
+	//}
+
+	allowedLevel = promlog.AllowedLevel{}
+	logger       kitlog.Logger
+	coordinator  *Coordinator
 )
 
 func copyHTTPResponse(resp *http.Response, w http.ResponseWriter) {
@@ -39,14 +53,17 @@ type targetGroup struct {
 }
 
 func main() {
-	allowedLevel := promlog.AllowedLevel{}
 	flag.AddFlags(kingpin.CommandLine, &allowedLevel)
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
-	logger := promlog.New(allowedLevel)
-	coordinator := NewCoordinator(logger)
+	logger = promlog.New(allowedLevel)
+	coordinator = NewCoordinator(logger)
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+
+	mux.Handle("/socket", websocket.Handler(handleSocketConnection))
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Proxy request
 		if r.URL.Host != "" {
 			ctx, _ := context.WithTimeout(r.Context(), util.GetScrapeTimeout(r.Header))
@@ -61,15 +78,6 @@ func main() {
 			}
 			defer resp.Body.Close()
 			copyHTTPResponse(resp, w)
-			return
-		}
-
-		// Client registering and asking for scrapes.
-		if r.URL.Path == "/poll" {
-			fqdn, _ := ioutil.ReadAll(r.Body)
-			request, _ := coordinator.WaitForScrapeInstruction(strings.TrimSpace(string(fqdn)))
-			request.WriteProxy(w) // Send full request as the body of the response.
-			level.Info(logger).Log("msg", "Responded to /poll", "url", request.URL.String(), "scrape_id", request.Header.Get("Id"))
 			return
 		}
 
@@ -101,6 +109,36 @@ func main() {
 		http.Error(w, "404: Unknown path", 404)
 	})
 
+	// cors.Default() setup the middleware with default options being
+	// all origins accepted with simple methods (GET, POST). See
+	// documentation below for more options.
+	handler := cors.Default().Handler(mux)
+
 	level.Info(logger).Log("msg", "Listening", "address", *listenAddress)
-	log.Fatal(http.ListenAndServe(*listenAddress, nil))
+	log.Fatal(http.ListenAndServe(*listenAddress, handler))
+}
+
+func handleSocketConnection(ws *websocket.Conn) {
+	level.Info(logger).Log("msg", "processing new WS connection", "remote_addr", ws.RemoteAddr)
+	// Register our new client
+
+	// wait for first register message
+	var msg util.SocketMessage
+	// Read in a new message as JSON and map it to a Socket Message object
+	level.Info(logger).Log("msg", "waiting for register message")
+
+	err := websocket.JSON.Receive(ws, &msg)
+	if err != nil {
+		level.Error(logger).Log("error: %v", err)
+		ws.Close()
+		return
+	}
+	level.Info(logger).Log("msg", "got message")
+
+	if msg.Type == util.Register {
+		fqdn := msg.Payload["fqdn"]
+		client := NewClient(fqdn, ws, coordinator)
+		coordinator.Add(client)
+		client.Listen()
+	}
 }
