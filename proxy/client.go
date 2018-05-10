@@ -1,14 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"io"
 
 	"os"
 
-	"bytes"
-	"fmt"
-
 	"bufio"
+	"bytes"
 	"net/http"
 	"strings"
 
@@ -127,18 +126,20 @@ func (c *Client) processMessage(msg *util.SocketMessage) {
 		go func() {
 			request, _ := coordinator.WaitForScrapeInstruction(c)
 
-			buf := &bytes.Buffer{}
-			request.WriteProxy(buf)
-			fmt.Printf("\nrequest: %s\n", buf.String())
+			if request != nil {
+				buf := &bytes.Buffer{}
+				request.WriteProxy(buf)
+				fmt.Printf("\nrequest: %s\n", buf.String())
 
-			scrapeRequest := &util.SocketMessage{
-				Type: util.Request,
-				Payload: map[string]string{
-					"request": buf.String(),
-				},
+				scrapeRequest := &util.SocketMessage{
+					Type: util.Request,
+					Payload: map[string]string{
+						"request": buf.String(),
+					},
+				}
+
+				c.Write(scrapeRequest)
 			}
-
-			c.Write(scrapeRequest)
 		}()
 	case util.Response:
 		level.Info(logger).Log("msg", "client response", "fqdn", c.fqdn)
