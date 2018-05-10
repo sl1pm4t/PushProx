@@ -35,7 +35,7 @@ type Coordinator struct {
 	logger log.Logger
 }
 
-func (c *Coordinator) doScrape(request *http.Request, client *http.Client) {
+func (c *Coordinator) doScrape(request *http.Request, client *http.Client, ws *websocket.Conn) {
 	logger := log.With(c.logger, "scrape_id", request.Header.Get("id"))
 	ctx, _ := context.WithTimeout(request.Context(), util.GetScrapeTimeout(request.Header))
 	request = request.WithContext(ctx)
@@ -57,7 +57,7 @@ func (c *Coordinator) doScrape(request *http.Request, client *http.Client) {
 			Header:     http.Header{},
 			Body:       ioutil.NopCloser(strings.NewReader(msg)),
 		}
-		err = c.doPush(resp, request, client)
+		err = c.doPush(resp, request, ws)
 		if err != nil {
 			level.Warn(logger).Log("msg", "Failed to push failed scrape response:", "err", err)
 			return
@@ -66,7 +66,7 @@ func (c *Coordinator) doScrape(request *http.Request, client *http.Client) {
 		return
 	}
 	level.Info(logger).Log("msg", "Retrieved scrape response")
-	err = c.doPush(scrapeResp, request, client)
+	err = c.doPush(scrapeResp, request, ws)
 	if err != nil {
 		level.Warn(logger).Log("msg", "Failed to push scrape response:", "err", err)
 		return
@@ -75,32 +75,22 @@ func (c *Coordinator) doScrape(request *http.Request, client *http.Client) {
 }
 
 // Report the result of the scrape back up to the proxy.
-func (c *Coordinator) doPush(resp *http.Response, origRequest *http.Request, client *http.Client) error {
+func (c *Coordinator) doPush(resp *http.Response, origRequest *http.Request, ws *websocket.Conn) error {
 	resp.Header.Set("id", origRequest.Header.Get("id")) // Link the request and response
 	// Remaining scrape deadline.
 	deadline, _ := origRequest.Context().Deadline()
 	resp.Header.Set("X-Prometheus-Scrape-Timeout", fmt.Sprintf("%f", float64(time.Until(deadline))/1e9))
 
-	base, err := url.Parse(*proxyURL)
-	if err != nil {
-		return err
-	}
-	u, err := url.Parse("/push")
-	if err != nil {
-		return err
-	}
-	url := base.ResolveReference(u)
-
 	buf := &bytes.Buffer{}
 	resp.Write(buf)
-	request := &http.Request{
-		Method:        "POST",
-		URL:           url,
-		Body:          ioutil.NopCloser(buf),
-		ContentLength: int64(buf.Len()),
+	msg := util.SocketMessage{
+		Type: util.Response,
+		Payload: map[string]string{
+			"response": buf.String(),
+		},
 	}
-	request = request.WithContext(origRequest.Context())
-	_, err = client.Do(request)
+
+	err := websocket.JSON.Send(ws, msg)
 	if err != nil {
 		return err
 	}
@@ -109,7 +99,7 @@ func (c *Coordinator) doPush(resp *http.Response, origRequest *http.Request, cli
 
 func loop(c Coordinator) {
 	client := &http.Client{
-		// Timeout: 10 * time.Second,
+		Timeout: 10 * time.Second,
 	}
 	base, err := url.Parse(*proxyURL)
 	if err != nil {
@@ -131,7 +121,7 @@ func loop(c Coordinator) {
 
 	var origin = fmt.Sprintf("http://%s/", *myFqdn)
 
-	level.Info(c.logger).Log("msg", "Dialing proxy:", "url", url.String())
+	level.Info(c.logger).Log("msg", "dialing proxy:", "url", url.String())
 	ws, err := websocket.Dial(url.String(), "", origin)
 	if err != nil {
 		level.Error(c.logger).Log("err", err.Error())
@@ -164,12 +154,13 @@ func loop(c Coordinator) {
 		err = websocket.JSON.Receive(ws, msg)
 		if err != nil {
 			if err == io.EOF {
+				level.Info(c.logger).Log("msg", "websocket got EOF")
 				return
 			}
 			level.Error(c.logger).Log(err)
 			return
 		}
-		fmt.Printf("Receive: %s\n", msg)
+		level.Info(c.logger).Log("msg", "received JSON msg")
 
 		reader := bufio.NewReader(strings.NewReader(msg.Payload["request"]))
 		request, err := http.ReadRequest(reader)
@@ -178,7 +169,7 @@ func loop(c Coordinator) {
 		}
 		fmt.Printf("Scrape Request: %s\n", request)
 		request.RequestURI = ""
-		c.doScrape(request, client)
+		c.doScrape(request, client, ws)
 		//time.Sleep(time.Second)
 	}
 }

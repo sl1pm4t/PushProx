@@ -73,17 +73,18 @@ func (c *Client) Listen() {
 
 // Listen write request via chanel
 func (c *Client) listenWrite() {
-	level.Info(c.coordinator.logger).Log("msg", "Listening write to client")
+	level.Info(c.coordinator.logger).Log("msg", "starting write loop for client", "fqdn", c.fqdn)
 	for {
 		select {
 
 		// send message to the client
 		case msg := <-c.ch:
-			level.Info(c.coordinator.logger).Log("sent", msg.Type)
+			level.Info(c.coordinator.logger).Log("msg", "sending JSON msg to client", "fqdn", c.fqdn, "type", msg.Type)
 			websocket.JSON.Send(c.ws, msg)
 
-			// receive done request
+		// receive done request
 		case <-c.doneCh:
+			c.coordinator.logger.Log("msg", "closing listenWrite loop", "fqdn", c.fqdn)
 			c.coordinator.Del(c)
 			c.doneCh <- true // for listenRead method
 			return
@@ -93,12 +94,13 @@ func (c *Client) listenWrite() {
 
 // Listen read request via chanel
 func (c *Client) listenRead() {
-	level.Info(c.coordinator.logger).Log("msg", "Read from client")
+	level.Info(c.coordinator.logger).Log("msg", "starting read for client", "fqdn", c.fqdn)
 	for {
 		select {
 
 		// receive done request
 		case <-c.doneCh:
+			c.coordinator.logger.Log("msg", "closing listenRead loop", "fqdn", c.fqdn)
 			c.coordinator.Del(c)
 			c.doneCh <- true // for listenWrite method
 			return
@@ -108,6 +110,7 @@ func (c *Client) listenRead() {
 			var msg *util.SocketMessage
 			err := websocket.JSON.Receive(c.ws, &msg)
 			if err == io.EOF {
+				c.coordinator.logger.Log("msg", "websocket got EOF", "fqdn", c.fqdn)
 				c.doneCh <- true
 			} else if err != nil {
 				level.Error(c.coordinator.logger).Log("err", err.Error())
@@ -154,7 +157,7 @@ func (c *Client) processMessage(msg *util.SocketMessage) {
 			c.Write(&util.SocketMessage{Type: util.Error, Payload: map[string]string{"error": err.Error()}})
 		}
 	default:
-		level.Error(logger).Log("msg", "unknown SocketMessage received", "kind", msg.Type)
+		level.Error(logger).Log("msg", "unknown SocketMessage received", "fqdn", c.fqdn, "type", msg.Type)
 		c.doneCh <- true
 	}
 }

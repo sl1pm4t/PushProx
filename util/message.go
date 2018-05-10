@@ -15,3 +15,19 @@ const (
 	Response
 	Error
 )
+
+func (t MessageType) String() string {
+	switch t {
+	case Register:
+		return "Register"
+	case Ready:
+		return "Ready"
+	case Request:
+		return "Request"
+	case Response:
+		return "Response"
+	case Error:
+		return "Error"
+	}
+	return "INVALID"
+}
