@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"io"
 
 	"os"
@@ -11,13 +10,15 @@ import (
 	"net/http"
 	"strings"
 
+	"encoding/base64"
+
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/robustperception/pushprox/util"
 	"golang.org/x/net/websocket"
 )
 
-const channelBufSize = 100
+const channelBufSize = 1
 
 // Proxy client.
 type Client struct {
@@ -56,8 +57,8 @@ func (c *Client) Write(msg *util.SocketMessage) {
 	select {
 	case c.ch <- msg:
 	default:
+		c.coordinator.logger.Log("msg", "could not send msg, client is disconnected", "fqdn", c.fqdn)
 		c.coordinator.Del(c)
-		c.coordinator.logger.Log("msg", "client is disconnected", "fqdn", c.fqdn)
 	}
 }
 
@@ -71,20 +72,28 @@ func (c *Client) Listen() {
 	c.listenRead()
 }
 
-// Listen write request via chanel
+// Listen write request via channel
 func (c *Client) listenWrite() {
 	level.Info(c.coordinator.logger).Log("msg", "starting write loop for client", "fqdn", c.fqdn)
 	for {
 		select {
-
 		// send message to the client
 		case msg := <-c.ch:
 			level.Info(c.coordinator.logger).Log("msg", "sending JSON msg to client", "fqdn", c.fqdn, "type", msg.Type)
-			websocket.JSON.Send(c.ws, msg)
+			err := websocket.JSON.Send(c.ws, msg)
+			if err == io.EOF {
+				c.coordinator.logger.Log("msg", "websocket got EOF", "fqdn", c.fqdn)
+
+				c.doneCh <- true
+			} else if err != nil {
+				level.Error(c.coordinator.logger).Log("msg", "error sending JSON msg to client", "fqdn", c.fqdn, "err", err.Error())
+			} else {
+				level.Info(c.coordinator.logger).Log("msg", "successfully sent JSON msg to client", "fqdn", c.fqdn, "type", msg.Type)
+			}
 
 		// receive done request
 		case <-c.doneCh:
-			c.coordinator.logger.Log("msg", "closing listenWrite loop", "fqdn", c.fqdn)
+			level.Info(c.coordinator.logger).Log("msg", "closing listenWrite loop", "fqdn", c.fqdn)
 			c.coordinator.Del(c)
 			c.doneCh <- true // for listenRead method
 			return
@@ -109,11 +118,14 @@ func (c *Client) listenRead() {
 		default:
 			var msg *util.SocketMessage
 			err := websocket.JSON.Receive(c.ws, &msg)
-			if err == io.EOF {
-				c.coordinator.logger.Log("msg", "websocket got EOF", "fqdn", c.fqdn)
-				c.doneCh <- true
-			} else if err != nil {
+			if err != nil {
+				if err == io.EOF {
+					c.coordinator.logger.Log("msg", "websocket got EOF", "fqdn", c.fqdn)
+					c.doneCh <- true
+					return
+				}
 				level.Error(c.coordinator.logger).Log("err", err.Error())
+
 			} else {
 				c.processMessage(msg)
 			}
@@ -125,33 +137,20 @@ func (c *Client) processMessage(msg *util.SocketMessage) {
 	switch msg.Type {
 	case util.Ready:
 		level.Info(logger).Log("msg", "client ready", "fqdn", c.fqdn)
+		go coordinator.WaitForScrapeInstruction(c)
 
-		go func() {
-			request, _ := coordinator.WaitForScrapeInstruction(c)
-
-			if request != nil {
-				buf := &bytes.Buffer{}
-				request.WriteProxy(buf)
-				fmt.Printf("\nrequest: %s\n", buf.String())
-
-				scrapeRequest := &util.SocketMessage{
-					Type: util.Request,
-					Payload: map[string]string{
-						"request": buf.String(),
-					},
-				}
-
-				c.Write(scrapeRequest)
-			}
-		}()
 	case util.Response:
 		level.Info(logger).Log("msg", "client response", "fqdn", c.fqdn)
 
 		buf := &bytes.Buffer{}
 		io.Copy(buf, strings.NewReader(msg.Payload["response"]))
-		scrapeResult, _ := http.ReadResponse(bufio.NewReader(buf), nil)
+		decoded, err := base64.StdEncoding.DecodeString(buf.String())
+		if err != nil {
+			level.Error(logger).Log("msg", "could not decode response payload", "err", err)
+		}
+		scrapeResult, _ := http.ReadResponse(bufio.NewReader(bytes.NewReader(decoded)), nil)
 		level.Info(logger).Log("msg", "got response", "scrape_id", scrapeResult.Header.Get("Id"))
-		err := coordinator.ScrapeResult(scrapeResult)
+		err = coordinator.ScrapeResult(scrapeResult)
 		if err != nil {
 			level.Error(logger).Log("msg", "Error processing response:", "err", err, "scrape_id", scrapeResult.Header.Get("Id"))
 			c.Write(&util.SocketMessage{Type: util.Error, Payload: map[string]string{"error": err.Error()}})

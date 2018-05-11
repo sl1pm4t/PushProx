@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -64,6 +65,13 @@ func (c *Coordinator) getRequestChannel(fqdn string) chan *http.Request {
 	return ch
 }
 
+// Remove a request channel. Idempotent.
+func (c *Coordinator) removeRequestChannel(fqdn string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.waiting, fqdn)
+}
+
 func (c *Coordinator) getResponseChannel(id string) chan *http.Response {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -85,11 +93,11 @@ func (c *Coordinator) removeResponseChannel(id string) {
 // Request a scrape.
 func (c *Coordinator) DoScrape(ctx context.Context, r *http.Request) (*http.Response, error) {
 	id := genId()
-	level.Info(c.logger).Log("msg", "DoScrape", "scrape_id", id, "url", r.URL.String())
+	level.Info(c.logger).Log("msg", "DoScrape", "scrape_id", id, "url", r.URL.Host)
 	r.Header.Add("Id", id)
 	select {
 	case <-ctx.Done():
-		return nil, fmt.Errorf("Matching client not found for %q: %s", r.URL.String(), ctx.Err())
+		return nil, fmt.Errorf("Matching client not found for %q: %s", r.URL.Host, ctx.Err())
 	case c.getRequestChannel(r.URL.Hostname()) <- r:
 	}
 
@@ -105,21 +113,29 @@ func (c *Coordinator) DoScrape(ctx context.Context, r *http.Request) (*http.Resp
 }
 
 // Client registering to accept a scrape request. Blocking.
-func (c *Coordinator) WaitForScrapeInstruction(client *Client) (*http.Request, error) {
+func (c *Coordinator) WaitForScrapeInstruction(client *Client) {
 	level.Info(c.logger).Log("msg", "WaitForScrapeInstruction", "fqdn", client.fqdn)
 
-	// TODO: What if the client times out?
 	ch := c.getRequestChannel(client.fqdn)
-	for {
-		request := <-ch
-		select {
-		case <-request.Context().Done():
-			// Request has timed out, get another one.
-		case <-client.doneCh:
-			return nil, nil
-		default:
-			return request, nil
+	defer c.removeRequestChannel(client.fqdn)
+	select {
+	case request := <-ch:
+		if request != nil {
+			buf := &bytes.Buffer{}
+			request.WriteProxy(buf)
+			level.Info(logger).Log("msg", "got scrape request for client", "fqdn", client.fqdn)
+
+			scrapeRequest := &util.SocketMessage{
+				Type: util.Request,
+				Payload: map[string]string{
+					"request": buf.String(),
+				},
+			}
+
+			client.Write(scrapeRequest)
 		}
+	case <-client.doneCh:
+		level.Info(logger).Log("msg", "WaitForScrapeInstruction got doneCh before scrape request", "fqdn", client.fqdn)
 	}
 }
 
@@ -164,6 +180,10 @@ func (c *Coordinator) Add(client *Client) {
 func (c *Coordinator) Del(client *Client) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	err := client.ws.Close()
+	if err != nil {
+		level.Warn(c.logger).Log("msg", "could not close client ws connection", "fqdn", client.fqdn, "err", err.Error())
+	}
 	delete(c.clients, client.fqdn)
 	level.Info(c.logger).Log("msg", "Deleted client", "fqdn", client.fqdn)
 }

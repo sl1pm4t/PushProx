@@ -18,6 +18,8 @@ import (
 
 	"io"
 
+	"encoding/base64"
+
 	"github.com/ShowMax/go-fqdn"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -65,7 +67,7 @@ func (c *Coordinator) doScrape(request *http.Request, client *http.Client, ws *w
 		level.Info(logger).Log("msg", "Pushed failed scrape response")
 		return
 	}
-	level.Info(logger).Log("msg", "Retrieved scrape response")
+	level.Info(logger).Log("msg", "Retrieved scrape response", "status_code", scrapeResp.StatusCode)
 	err = c.doPush(scrapeResp, request, ws)
 	if err != nil {
 		level.Warn(logger).Log("msg", "Failed to push scrape response:", "err", err)
@@ -83,10 +85,11 @@ func (c *Coordinator) doPush(resp *http.Response, origRequest *http.Request, ws 
 
 	buf := &bytes.Buffer{}
 	resp.Write(buf)
+	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
 	msg := util.SocketMessage{
 		Type: util.Response,
 		Payload: map[string]string{
-			"response": buf.String(),
+			"response": encoded,
 		},
 	}
 
@@ -162,15 +165,21 @@ func loop(c Coordinator) {
 		}
 		level.Info(c.logger).Log("msg", "received JSON msg")
 
-		reader := bufio.NewReader(strings.NewReader(msg.Payload["request"]))
-		request, err := http.ReadRequest(reader)
-		if err != nil {
-			level.Error(c.logger).Log(err)
+		switch msg.Type {
+		case util.Request:
+			reader := bufio.NewReader(strings.NewReader(msg.Payload["request"]))
+			request, err := http.ReadRequest(reader)
+			if err != nil {
+				level.Error(c.logger).Log(err)
+			}
+			level.Info(c.logger).Log("msg", "received scrape request")
+
+			// have to remove RequestURI otherwise http lib will complain
+			request.RequestURI = ""
+			c.doScrape(request, client, ws)
+		default:
+			level.Info(c.logger).Log("msg", "no handler for msg type", "type", msg.Type.String())
 		}
-		fmt.Printf("Scrape Request: %s\n", request)
-		request.RequestURI = ""
-		c.doScrape(request, client, ws)
-		//time.Sleep(time.Second)
 	}
 }
 
