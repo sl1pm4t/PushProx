@@ -12,6 +12,8 @@ import (
 
 	"encoding/base64"
 
+	"time"
+
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/robustperception/pushprox/util"
@@ -72,11 +74,26 @@ func (c *Client) Listen() {
 	c.listenRead()
 }
 
+var PINGER = websocket.Codec{pingerMarshal, pongerUnmarshal}
+
+func pingerMarshal(v interface{}) (msg []byte, payloadType byte, err error) {
+	return nil, websocket.PingFrame, nil
+}
+
+func pongerUnmarshal(msg []byte, payloadType byte, v interface{}) (err error) {
+	return nil
+}
+
 // Listen write request via channel
 func (c *Client) listenWrite() {
 	level.Info(c.coordinator.logger).Log("msg", "starting write loop for client", "fqdn", c.fqdn)
 	for {
 		select {
+		// send websocket ping every 3s
+		case <-time.After(3 * time.Second):
+			level.Debug(c.coordinator.logger).Log("msg", "ping", "fqdn", c.fqdn)
+			PINGER.Send(c.ws, "ping")
+
 		// send message to the client
 		case msg := <-c.ch:
 			level.Info(c.coordinator.logger).Log("msg", "sending JSON msg to client", "fqdn", c.fqdn, "type", msg.Type)
