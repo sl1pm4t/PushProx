@@ -17,6 +17,8 @@ import (
 	"github.com/prometheus/common/promlog"
 	"github.com/prometheus/common/promlog/flag"
 
+	"time"
+
 	"github.com/robustperception/pushprox/util"
 	"github.com/rs/cors"
 	"golang.org/x/net/websocket"
@@ -27,16 +29,13 @@ var (
 
 	clients = make(map[*websocket.Conn]bool) // connected clients
 
-	//upgrader = websocket.Upgrader{
-	//	CheckOrigin: func(r *http.Request) bool {
-	//		return true
-	//	},
-	//
-	//}
-
 	allowedLevel = promlog.AllowedLevel{}
 	logger       kitlog.Logger
 	coordinator  *Coordinator
+
+	regAck = &util.SocketMessage{
+		Type: util.RegisterAck,
+	}
 )
 
 func copyHTTPResponse(resp *http.Response, w http.ResponseWriter) {
@@ -139,6 +138,10 @@ func handleSocketConnection(ws *websocket.Conn) {
 		fqdn := msg.Payload["fqdn"]
 		client := NewClient(fqdn, ws, coordinator)
 		coordinator.Add(client)
+		go func() {
+			time.Sleep(time.Second)
+			client.Write(regAck)
+		}()
 		client.Listen()
 	}
 }
