@@ -98,7 +98,16 @@ func NewClient(proxyURL string, logger log.Logger, coordinator *Coordinator) *Cl
 
 func (c *Client) Run() {
 	level.Info(c.logger).Log("msg", "starting client")
-	go c.SetState(DisconnectedState)
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go c.stateLoop(wg)
+	c.SetState(DisconnectedState)
+	wg.Wait()
+	level.Info(c.logger).Log("msg", "goodbye")
+}
+
+func (c *Client) stateLoop(wg *sync.WaitGroup) {
+	defer wg.Done()
 	var stateChange ClientStateChange
 	for {
 		// wait for state change
@@ -115,7 +124,8 @@ func (c *Client) Run() {
 				// Don't pound the server. TODO: Randomised exponential backoff.
 				time.Sleep(5 * time.Second)
 			}
-			go c.connect()
+			c.connect()
+
 		case ConnectedState:
 			// listen for WS client disconnects
 			go func() {
@@ -128,15 +138,18 @@ func (c *Client) Run() {
 				}
 			}()
 
-			go c.register()
+			c.register()
+
 		case PendingRegisteredState:
 			// TODO: handle timeout
 		case RegisteredState:
-			go c.sendReady()
+			c.sendReady()
+
 		case ReadyState:
 			// TODO: handle timeout?
 		case RequestCompletedState:
-			go c.sendReady()
+			c.sendReady()
+
 		case ErrorState:
 			// reset
 			if c.wsClient != nil {
@@ -183,7 +196,9 @@ func (c *Client) SetState(newState ClientState) {
 	level.Debug(c.logger).Log("msg", "state change", "oldState", oldState, "newState", newState)
 
 	c.state = newState
-	c.stateCh <- ClientStateChange{oldState, newState}
+	go func() {
+		c.stateCh <- ClientStateChange{oldState, newState}
+	}()
 }
 
 func (c *Client) connect() {
@@ -237,7 +252,11 @@ func (c *Client) register() {
 
 func (c *Client) sendReady() {
 	level.Debug(c.logger).Log("msg", "sendReady")
-	c.wsClient.Write(readyMessage)
+	err := c.wsClient.Write(readyMessage)
+	if err != nil {
+		c.SetState(ErrorState)
+		return
+	}
 
 	level.Info(c.logger).Log("msg", "sent ready to proxy")
 	c.SetState(ReadyState)

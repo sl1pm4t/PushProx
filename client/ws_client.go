@@ -5,6 +5,8 @@ import (
 	"os"
 	"time"
 
+	"fmt"
+
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/robustperception/pushprox/util"
@@ -55,12 +57,14 @@ func (c *WSClient) Conn() *websocket.Conn {
 	return c.ws
 }
 
-func (c *WSClient) Write(msg *util.SocketMessage) {
+func (c *WSClient) Write(msg *util.SocketMessage) error {
 	select {
 	case c.ch <- msg:
 	default:
 		level.Warn(c.coordinator.logger).Log("msg", "could not send msg, client is disconnected", "fqdn", c.fqdn)
+		return fmt.Errorf("could not send msg, websocket is disconnected")
 	}
+	return nil
 }
 
 func (c *WSClient) Done() {
