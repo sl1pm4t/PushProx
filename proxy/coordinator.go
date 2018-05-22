@@ -136,6 +136,8 @@ func (c *Coordinator) WaitForScrapeInstruction(client *Client) {
 		}
 	case <-client.doneCh:
 		level.Info(logger).Log("msg", "WaitForScrapeInstruction got doneCh before scrape request", "fqdn", client.fqdn)
+		client.Done()
+		return
 	}
 }
 
@@ -182,7 +184,7 @@ func (c *Coordinator) Del(client *Client) {
 	defer c.mu.Unlock()
 	err := client.ws.Close()
 	if err != nil {
-		level.Warn(c.logger).Log("msg", "could not close client ws connection", "fqdn", client.fqdn, "err", err.Error())
+		level.Debug(c.logger).Log("msg", "could not close client ws connection", "fqdn", client.fqdn, "err", err.Error())
 	}
 	delete(c.clients, client.fqdn)
 	level.Info(c.logger).Log("msg", "Deleted client", "fqdn", client.fqdn)

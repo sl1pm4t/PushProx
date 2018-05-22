@@ -113,7 +113,7 @@ func main() {
 	// documentation below for more options.
 	handler := cors.Default().Handler(mux)
 
-	level.Info(logger).Log("msg", "Listening", "address", *listenAddress)
+	level.Info(logger).Log("msg", "listening", "address", *listenAddress)
 	log.Fatal(http.ListenAndServe(*listenAddress, handler))
 }
 

@@ -59,29 +59,28 @@ func (c *Client) Write(msg *util.SocketMessage) {
 	select {
 	case c.ch <- msg:
 	default:
-		c.coordinator.logger.Log("msg", "could not send msg, client is disconnected", "fqdn", c.fqdn)
+		level.Warn(c.coordinator.logger).Log("msg", "could not send msg, client is disconnected", "fqdn", c.fqdn)
 		c.coordinator.Del(c)
 	}
 }
 
 func (c *Client) Done() {
-	c.doneCh <- true
+	level.Debug(c.coordinator.logger).Log("msg", "---DONE---", "fqdn", c.fqdn)
+	select {
+	case c.doneCh <- true:
+	case <-time.After(time.Second):
+		// The done signal can originate on several different goroutines, which all re-fire
+		// the signal onto the channel to make sure it's received by all others.
+		// The last one to signal would block and leak a goroutine.
+		// To avoid a leak, timeout after 1s.
+		level.Debug(c.coordinator.logger).Log("msg", "timed out waiting to signal Done", "fqdn", c.fqdn)
+	}
 }
 
 // Listen Write and Read request via chanel
 func (c *Client) Listen() {
 	go c.listenWrite()
 	c.listenRead()
-}
-
-var PINGER = websocket.Codec{pingerMarshal, pongerUnmarshal}
-
-func pingerMarshal(v interface{}) (msg []byte, payloadType byte, err error) {
-	return nil, websocket.PingFrame, nil
-}
-
-func pongerUnmarshal(msg []byte, payloadType byte, v interface{}) (err error) {
-	return nil
 }
 
 // Listen write request via channel
@@ -92,7 +91,11 @@ func (c *Client) listenWrite() {
 		// send websocket ping every 3s
 		case <-time.After(3 * time.Second):
 			level.Debug(c.coordinator.logger).Log("msg", "ping", "fqdn", c.fqdn)
-			PINGER.Send(c.ws, "ping")
+			err := util.PINGER.Send(c.ws, "ping")
+			if err != nil {
+				level.Error(c.coordinator.logger).Log("msg", "ping err", "fqdn", c.fqdn, "err", err.Error())
+				c.Done()
+			}
 
 		// send message to the client
 		case msg := <-c.ch:
@@ -101,9 +104,10 @@ func (c *Client) listenWrite() {
 			if err == io.EOF {
 				c.coordinator.logger.Log("msg", "websocket got EOF", "fqdn", c.fqdn)
 
-				c.doneCh <- true
+				c.Done()
 			} else if err != nil {
 				level.Error(c.coordinator.logger).Log("msg", "error sending JSON msg to client", "fqdn", c.fqdn, "err", err.Error())
+				c.Done()
 			} else {
 				level.Info(c.coordinator.logger).Log("msg", "successfully sent JSON msg to client", "fqdn", c.fqdn, "type", msg.Type)
 			}
@@ -112,7 +116,7 @@ func (c *Client) listenWrite() {
 		case <-c.doneCh:
 			level.Info(c.coordinator.logger).Log("msg", "closing listenWrite loop", "fqdn", c.fqdn)
 			c.coordinator.Del(c)
-			c.doneCh <- true // for listenRead method
+			defer c.Done() // for listenRead method
 			return
 		}
 	}
@@ -126,9 +130,9 @@ func (c *Client) listenRead() {
 
 		// receive done request
 		case <-c.doneCh:
-			c.coordinator.logger.Log("msg", "closing listenRead loop", "fqdn", c.fqdn)
+			level.Debug(c.coordinator.logger).Log("msg", "closing listenRead loop", "fqdn", c.fqdn)
 			c.coordinator.Del(c)
-			c.doneCh <- true // for listenWrite method
+			defer c.Done() // for listenWrite method
 			return
 
 		// read data from websocket connection
@@ -137,8 +141,8 @@ func (c *Client) listenRead() {
 			err := websocket.JSON.Receive(c.ws, &msg)
 			if err != nil {
 				if err == io.EOF {
-					c.coordinator.logger.Log("msg", "websocket got EOF", "fqdn", c.fqdn)
-					c.doneCh <- true
+					level.Warn(c.coordinator.logger).Log("msg", "websocket got EOF", "fqdn", c.fqdn)
+					defer c.Done()
 					return
 				}
 				level.Error(c.coordinator.logger).Log("err", err.Error())
@@ -153,27 +157,27 @@ func (c *Client) listenRead() {
 func (c *Client) processMessage(msg *util.SocketMessage) {
 	switch msg.Type {
 	case util.Ready:
-		level.Info(logger).Log("msg", "client ready", "fqdn", c.fqdn)
+		level.Info(c.coordinator.logger).Log("msg", "client ready", "fqdn", c.fqdn)
 		go coordinator.WaitForScrapeInstruction(c)
 
 	case util.Response:
-		level.Info(logger).Log("msg", "client response", "fqdn", c.fqdn)
+		level.Info(c.coordinator.logger).Log("msg", "client response", "fqdn", c.fqdn)
 
 		buf := &bytes.Buffer{}
 		io.Copy(buf, strings.NewReader(msg.Payload["response"]))
 		decoded, err := base64.StdEncoding.DecodeString(buf.String())
 		if err != nil {
-			level.Error(logger).Log("msg", "could not decode response payload", "err", err)
+			level.Error(c.coordinator.logger).Log("msg", "could not decode response payload", "err", err)
 		}
 		scrapeResult, _ := http.ReadResponse(bufio.NewReader(bytes.NewReader(decoded)), nil)
-		level.Info(logger).Log("msg", "got response", "scrape_id", scrapeResult.Header.Get("Id"))
+		level.Info(c.coordinator.logger).Log("msg", "got response", "scrape_id", scrapeResult.Header.Get("Id"))
 		err = coordinator.ScrapeResult(scrapeResult)
 		if err != nil {
-			level.Error(logger).Log("msg", "Error processing response:", "err", err, "scrape_id", scrapeResult.Header.Get("Id"))
+			level.Error(c.coordinator.logger).Log("msg", "error processing response:", "err", err, "scrape_id", scrapeResult.Header.Get("Id"))
 			c.Write(&util.SocketMessage{Type: util.Error, Payload: map[string]string{"error": err.Error()}})
 		}
 	default:
-		level.Error(logger).Log("msg", "unknown SocketMessage received", "fqdn", c.fqdn, "type", msg.Type)
+		level.Error(c.coordinator.logger).Log("msg", "unknown SocketMessage received", "fqdn", c.fqdn, "type", msg.Type)
 		c.doneCh <- true
 	}
 }
