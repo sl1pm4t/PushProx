@@ -22,6 +22,8 @@ import (
 
 const channelBufSize = 1
 
+var zeroTime = time.Time{}
+
 // Proxy client.
 type Client struct {
 	fqdn        string
@@ -29,6 +31,7 @@ type Client struct {
 	coordinator *Coordinator
 	ch          chan *util.SocketMessage
 	doneCh      chan bool
+	deletedTime time.Time
 }
 
 // Create new proxy client.
@@ -48,7 +51,7 @@ func NewClient(fqdn string, ws *websocket.Conn, coordinator *Coordinator) *Clien
 	ch := make(chan *util.SocketMessage, channelBufSize)
 	doneCh := make(chan bool)
 
-	return &Client{fqdn, ws, coordinator, ch, doneCh}
+	return &Client{fqdn, ws, coordinator, ch, doneCh, zeroTime}
 }
 
 func (c *Client) Conn() *websocket.Conn {

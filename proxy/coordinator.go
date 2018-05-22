@@ -164,8 +164,13 @@ func (c *Coordinator) KnownClients() []string {
 	defer c.mu.Unlock()
 
 	known := make([]string, 0, len(c.clients))
-	for k, _ := range c.clients {
-		known = append(known, k)
+	for k, client := range c.clients {
+		if !client.deletedTime.IsZero() && client.deletedTime.Before(time.Now().Add(-*registrationTimeout)) {
+			level.Info(c.logger).Log("msg", "deleting client", "fqdn", client.fqdn, "deleted time", client.deletedTime)
+			delete(c.clients, k)
+		} else {
+			known = append(known, k)
+		}
 	}
 	return known
 }
@@ -186,6 +191,7 @@ func (c *Coordinator) Del(client *Client) {
 	if err != nil {
 		level.Debug(c.logger).Log("msg", "could not close client ws connection", "fqdn", client.fqdn, "err", err.Error())
 	}
-	delete(c.clients, client.fqdn)
-	level.Info(c.logger).Log("msg", "Deleted client", "fqdn", client.fqdn)
+	//delete(c.clients, client.fqdn)
+	client.deletedTime = time.Now()
+	level.Info(c.logger).Log("msg", "marked client for deletion", "fqdn", client.fqdn)
 }
