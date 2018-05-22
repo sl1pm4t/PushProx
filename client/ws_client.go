@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
 	"time"
@@ -15,7 +16,7 @@ import (
 
 const channelBufSize = 1
 
-type ProcessWebSocketMessageFunc func(message *util.SocketMessage)
+type ProcessWebSocketMessageFunc func(ctx context.Context, message *util.SocketMessage)
 
 // WebSocket client.
 type WSClient struct {
@@ -68,15 +69,23 @@ func (c *WSClient) Write(msg *util.SocketMessage) error {
 }
 
 func (c *WSClient) Done() {
-	level.Debug(c.coordinator.logger).Log("msg", "---DONE---", "fqdn", c.fqdn)
-	c.doneCh <- true
+	level.Debug(c.coordinator.logger).Log("msg", "Done()", "fqdn", c.fqdn)
+	select {
+	case c.doneCh <- true:
+	case <-time.After(time.Second):
+		// The done signal can originate on several different goroutines, which all re-fire
+		// the signal onto the channel to make sure it's received by all others.
+		// The last one to signal would block and leak a goroutine.
+		// To avoid a leak, timeout after 1s.
+		level.Debug(c.coordinator.logger).Log("msg", "timed out waiting to signal Done", "fqdn", c.fqdn)
+	}
 }
 
 // Listen Write and Read request via chanel
-func (c *WSClient) Listen() {
+func (c *WSClient) Listen(ctx context.Context) {
 	readyCh := make(chan bool, 2)
-	go c.listenWrite(readyCh)
-	go c.listenRead(readyCh)
+	go c.listenWrite(ctx, readyCh)
+	go c.listenRead(ctx, readyCh)
 	readyCount := 0
 	for range readyCh {
 		readyCount += 1
@@ -87,11 +96,12 @@ func (c *WSClient) Listen() {
 }
 
 // Listen write request via channel
-func (c *WSClient) listenWrite(readyCh chan bool) {
+func (c *WSClient) listenWrite(ctx context.Context, readyCh chan bool) {
 	level.Info(c.coordinator.logger).Log("msg", "starting write loop for client", "fqdn", c.fqdn)
 	readyCh <- true
 	for {
 		select {
+		case <-ctx.Done():
 		case <-time.After(3 * time.Second):
 			// send websocket ping every 3s
 			level.Debug(c.coordinator.logger).Log("msg", "ping", "fqdn", c.fqdn)
@@ -128,11 +138,12 @@ func (c *WSClient) listenWrite(readyCh chan bool) {
 }
 
 // Listen read request via chanel
-func (c *WSClient) listenRead(readyCh chan bool) {
+func (c *WSClient) listenRead(ctx context.Context, readyCh chan bool) {
 	level.Info(c.coordinator.logger).Log("msg", "starting read for client", "fqdn", c.fqdn)
 	readyCh <- true
 	for {
 		select {
+		case <-ctx.Done():
 		case <-c.doneCh:
 			// receive done request
 			level.Debug(c.coordinator.logger).Log("msg", "closing listenRead loop", "fqdn", c.fqdn)
@@ -153,7 +164,7 @@ func (c *WSClient) listenRead(readyCh chan bool) {
 				level.Error(c.coordinator.logger).Log("err", err.Error())
 
 			} else {
-				c.processMessage(msg)
+				c.processMessage(ctx, msg)
 			}
 		}
 	}
