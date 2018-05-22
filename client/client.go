@@ -48,7 +48,6 @@ const (
 	ConnectedState
 	PendingRegisteredState
 	RegisteredState
-	PendingReadyState
 	ReadyState
 	ProcessingRequestState
 	RequestCompletedState
@@ -69,8 +68,6 @@ func (s ClientState) String() string {
 		return "PendingRegisteredState"
 	case RegisteredState:
 		return "RegisteredState"
-	case PendingReadyState:
-		return "PendingReadyState"
 	case ReadyState:
 		return "ReadyState"
 	case ProcessingRequestState:
@@ -172,9 +169,10 @@ func (c *Client) SetState(newState ClientState) {
 	case oldState == ConnectErrorState && newState == ConnectedState:
 	case oldState == ConnectedState && newState == PendingRegisteredState:
 	case oldState == PendingRegisteredState && newState == RegisteredState:
-	case oldState == PendingReadyState && newState == ReadyState:
+	case oldState == RegisteredState && newState == ReadyState:
 	case oldState == ReadyState && newState == ProcessingRequestState:
 	case oldState == ProcessingRequestState && newState == RequestCompletedState:
+	case oldState == RequestCompletedState && newState == ReadyState:
 
 	default:
 		level.Error(c.logger).Log("msg", "invalid state transition", "oldState", oldState, "newState", newState)
@@ -242,7 +240,7 @@ func (c *Client) sendReady() {
 	c.wsClient.Write(readyMessage)
 
 	level.Info(c.logger).Log("msg", "sent ready to proxy")
-	c.SetState(PendingReadyState)
+	c.SetState(ReadyState)
 }
 
 func (c *Client) processMessage(msg *util.SocketMessage) {
@@ -293,83 +291,3 @@ func (c *Client) sendResponse(resp *http.Response) {
 	c.wsClient.Write(msg)
 	c.SetState(RequestCompletedState)
 }
-
-//func loop(c Coordinator) {
-//	base, err := url.Parse(*proxyURL)
-//	if err != nil {
-//		level.Error(c.logger).Log("msg", "Error parsing url:", "err", err)
-//		return
-//	}
-//	u, err := url.Parse("/socket")
-//	if err != nil {
-//		level.Error(c.logger).Log("msg", "Error parsing url:", "err", err)
-//		return
-//	}
-//	url := base.ResolveReference(u)
-//
-//	if url.Scheme == "http" {
-//		url.Scheme = "ws"
-//	} else if url.Scheme == "https" {
-//		url.Scheme = "wss"
-//	}
-//
-//	var origin = fmt.Sprintf("http://%s/", *myFqdn)
-//
-//	level.Info(c.logger).Log("msg", "dialing proxy:", "url", url.String())
-//	ws, err := websocket.Dial(url.String(), "", origin)
-//	if err != nil {
-//		level.Error(c.logger).Log("err", err.Error())
-//		time.Sleep(time.Second) // Don't pound the server. TODO: Randomised exponential backoff.
-//		return
-//	}
-//
-//	err = websocket.JSON.Send(ws, &util.SocketMessage{
-//		Type: util.Register,
-//		Payload: map[string]string{
-//			"fqdn": *myFqdn,
-//		},
-//	})
-//	if err != nil {
-//		level.Error(c.logger).Log(err)
-//	}
-//	level.Info(c.logger).Log("msg", "client registered with proxy")
-//
-//	ready := &util.SocketMessage{
-//		Type: util.Ready,
-//	}
-//
-//	for {
-//		err = websocket.JSON.Send(ws, ready)
-//		if err != nil {
-//			level.Error(c.logger).Log(err)
-//		}
-//
-//		var msg = &util.SocketMessage{}
-//		err = websocket.JSON.Receive(ws, msg)
-//		if err != nil {
-//			if err == io.EOF {
-//				level.Info(c.logger).Log("msg", "websocket got EOF")
-//				return
-//			}
-//			level.Error(c.logger).Log(err)
-//			return
-//		}
-//		level.Info(c.logger).Log("msg", "received JSON msg")
-//
-//		switch msg.Type {
-//		case util.Request:
-//			reader := bufio.NewReader(strings.NewReader(msg.Payload["request"]))
-//			request, err := http.ReadRequest(reader)
-//			if err != nil {
-//				level.Error(c.logger).Log(err)
-//			}
-//			level.Info(c.logger).Log("msg", "received scrape request")
-//
-//			// have to remove RequestURI otherwise http lib will complain
-//			request.RequestURI = ""
-//			c.doScrape(request, ws)
-//		default:
-//			level.Info(c.logger).Log("msg", "no handler for msg type", "type", msg.Type.String())
-//		}
-//	}
-//}
